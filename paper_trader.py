@@ -34,6 +34,10 @@ REAL_TRADING_ENABLED = True
 MAX_ORDER_RLS        = 100_000
 PENDING_TIMEOUT_MIN  = 30
 
+# ===== حالت تست (فقط برای تست!) =====
+# وقتی True باشه، دکمه خرید همیشه فعاله
+TEST_MODE_FORCE_BUY = True   # ← برای تست True بذار، بعداً False کن
+
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
 
@@ -336,10 +340,9 @@ def check_exit(state, latest):
 
 
 # ==================================================
-# ساخت پیام وضعیت + دکمه‌ها (همیشه نمایش)
+# ساخت پیام وضعیت + دکمه‌ها
 # ==================================================
 def build_status_with_buttons(latest, now_str, state):
-    """پیام وضعیت با دکمه‌های همیشه‌نمایان"""
     price       = latest["close"]
     donchian    = latest["donchian_high"]
     adx         = latest["adx"]
@@ -352,13 +355,19 @@ def build_status_with_buttons(latest, now_str, state):
     vol_pct     = min(100, (vol_ratio / VOL_MULT * 100))
     total_pct   = (price_pct + adx_pct + vol_pct) / 3
 
-    # ===== وضعیت دکمه‌ها =====
-    buy_ok = (
+    # ===== شرط واقعی =====
+    real_buy_ok = (
         latest["close"] > latest["donchian_high"] and
         latest["adx"] > ADX_MIN and
         latest["volume"] > (VOL_MULT * latest["vol_avg"])
     )
     sell_ok = state["in_position"]
+
+    # ===== در حالت تست، دکمه خرید همیشه فعاله =====
+    if TEST_MODE_FORCE_BUY and not state["in_position"]:
+        buy_ok = True
+    else:
+        buy_ok = real_buy_ok
 
     # ===== متن =====
     msg = (
@@ -377,6 +386,9 @@ def build_status_with_buttons(latest, now_str, state):
         f"━━━━━━━━━━━━━━━\n"
         f"🎯 <b>آمادگی کل: {total_pct:.1f}%</b>\n"
     )
+
+    if TEST_MODE_FORCE_BUY:
+        msg += "\n🧪 <b>حالت تست فعال</b> — دکمه خرید بازه"
 
     if state["in_position"]:
         msg += (
@@ -438,7 +450,7 @@ def process_callbacks(state):
 
         # ===== بررسی pending =====
         if not pending:
-            answer_callback(cb_id, "❌ ابتدا باید /run رو بزنی")
+            answer_callback(cb_id, "❌ اطلاعات سیگنال موجود نیست — بعداً امتحان کن")
             continue
 
         # ===== timeout =====
@@ -450,11 +462,20 @@ def process_callbacks(state):
             state["pending"] = None
             continue
 
-        # ===== تأیید خرید =====
+        # ==================================================
+        # تأیید خرید
+        # ==================================================
         if data == "confirm_buy":
             answer_callback(cb_id, "⏳ در حال ارسال سفارش...")
             amount_rls = pending["amount_rls"]
-            code, res = place_market_buy(amount_rls)
+            print(f"Sending BUY order for {amount_rls} RLS")
+
+            try:
+                code, res = place_market_buy(amount_rls)
+            except Exception as e:
+                code, res = 0, {"error": str(e)}
+
+            print(f"Order response: code={code} data={res}")
 
             if code == 200 and res.get("status") == "ok":
                 order = res.get("order", {})
@@ -483,8 +504,21 @@ def process_callbacks(state):
                 edit_telegram(msg_id, new_text)
                 send_telegram(new_text)
             else:
-                err = res.get("message", str(res))
-                edit_telegram(msg_id, f"❌ <b>خطا</b>\n{err}")
+                # ===== نمایش کامل خطا =====
+                try:
+                    err_json = json.dumps(res, ensure_ascii=False, indent=2)
+                except Exception:
+                    err_json = str(res)
+
+                err_text = (
+                    f"❌ <b>سفارش رد شد</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📛 <b>Status Code:</b> <code>{code}</code>\n\n"
+                    f"📋 <b>پاسخ نوبیتکس:</b>\n"
+                    f"<code>{err_json[:900]}</code>"
+                )
+                edit_telegram(msg_id, err_text)
+                send_telegram(err_text)
                 state["pending"] = None
                 save_state(state)
 
@@ -494,18 +528,26 @@ def process_callbacks(state):
             edit_telegram(msg_id, "❌ <b>لغو شد</b>")
             state["pending"] = None
 
-        # ===== تأیید فروش =====
+        # ==================================================
+        # تأیید فروش
+        # ==================================================
         elif data == "confirm_sell":
             answer_callback(cb_id, "⏳ در حال فروش...")
 
             wallets = get_wallets()
             doge_balance = wallets.get("doge", 0)
             if doge_balance <= 0:
-                edit_telegram(msg_id, "❌ <b>موجودی DOGE صفره</b>")
+                err_text = "❌ <b>موجودی DOGE صفره</b>"
+                edit_telegram(msg_id, err_text)
+                send_telegram(err_text)
                 state["pending"] = None
                 continue
 
-            code, res = place_market_sell(doge_balance)
+            try:
+                code, res = place_market_sell(doge_balance)
+            except Exception as e:
+                code, res = 0, {"error": str(e)}
+
             if code == 200 and res.get("status") == "ok":
                 order = res.get("order", {})
                 order_id = order.get("id", "?")
@@ -550,8 +592,20 @@ def process_callbacks(state):
                 edit_telegram(msg_id, new_text)
                 send_telegram(new_text)
             else:
-                err = res.get("message", str(res))
-                edit_telegram(msg_id, f"❌ <b>خطا</b>\n{err}")
+                try:
+                    err_json = json.dumps(res, ensure_ascii=False, indent=2)
+                except Exception:
+                    err_json = str(res)
+
+                err_text = (
+                    f"❌ <b>سفارش فروش رد شد</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📛 <b>Status Code:</b> <code>{code}</code>\n\n"
+                    f"📋 <b>پاسخ نوبیتکس:</b>\n"
+                    f"<code>{err_json[:900]}</code>"
+                )
+                edit_telegram(msg_id, err_text)
+                send_telegram(err_text)
                 state["pending"] = None
                 save_state(state)
 
@@ -596,7 +650,7 @@ def run_once():
     # ===== ۴. ساخت پیام + دکمه =====
     msg, keyboard, buy_ok, sell_ok = build_status_with_buttons(latest, now_str, state)
 
-    # ===== ۵. ثبت pending اگه سیگنال معتبر =====
+    # ===== ۵. ثبت pending =====
     if buy_ok and not state["in_position"]:
         entry_price = latest["close"] * (1 + SLIPPAGE)
         trade_value = state["capital"] * POSITION_PCT
@@ -612,7 +666,7 @@ def run_once():
             "time":        datetime.now().isoformat(),
         }
         save_state(state)
-        print(f">>> SIGNAL READY (BUY) @ {fmt_price(entry_price)}")
+        print(f">>> BUY PENDING @ {fmt_price(entry_price)}")
 
     elif sell_ok:
         exit_price = latest["close"] * (1 - SLIPPAGE)
@@ -622,7 +676,7 @@ def run_once():
             "time":        datetime.now().isoformat(),
         }
         save_state(state)
-        print(f"<<< SIGNAL READY (SELL) @ {fmt_price(exit_price)}")
+        print(f"<<< SELL PENDING @ {fmt_price(exit_price)}")
 
     # ===== ۶. ارسال پیام =====
     send_telegram(msg, reply_markup=keyboard)
