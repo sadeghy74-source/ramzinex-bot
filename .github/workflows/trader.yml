@@ -1,0 +1,38 @@
+name: Ramzinex Paper Trader
+
+on:
+  schedule:
+    # اجرا هر ساعت در دقیقه ۵ (UTC)
+    - cron: '5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-trader:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests pandas numpy python-dotenv pynacl
+      
+      - name: Run Paper Trader
+        env:
+          NOBITEX_PUBLIC_KEY: ${{ secrets.NOBITEX_PUBLIC_KEY }}
+          NOBITEX_PRIVATE_KEY: ${{ secrets.NOBITEX_PRIVATE_KEY }}
+        run: python paper_trader.py once
+      
+      - name: Commit state files
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add paper_state.json paper_trades.csv || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          git push || true
