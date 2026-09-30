@@ -5,12 +5,15 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
+# ===== خواندن کلیدها از متغیرهای محیطی =====
+PUBLIC_KEY  = os.getenv("NOBITEX_PUBLIC_KEY")
+PRIVATE_KEY = os.getenv("NOBITEX_PRIVATE_KEY")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==================================================
-# پارامترها (دقیقاً یکسان با بهترین بک‌تست DOGE)
+# پارامترهای استراتژی (بهینه DOGE)
 # ==================================================
 COIN         = "DOGE"
 SYMBOL       = "DOGEIRT"
@@ -20,25 +23,39 @@ TRAILING_ATR = 4.0
 ADX_MIN      = 35
 VOL_MULT     = 1.5
 
-# ===== ریسک =====
-FEE           = 0.005
-SLIPPAGE      = 0.001
-MAX_HOLD_HOURS = None      # ✅ غیرفعال (یکسان با بک‌تست)
-
-# ===== سرمایه =====
+FEE             = 0.005
+SLIPPAGE        = 0.001
 INITIAL_CAPITAL = 20_000_000
 POSITION_PCT    = 1.0
-
-# ===== گزینه‌ها =====
-USE_DYNAMIC_ATR     = False
-ONLY_CLOSED_CANDLES = True
 
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
 
 
 # ==================================================
-# کمکی
+# ارسال پیام به تلگرام
+# ==================================================
+def send_telegram(message: str, parse_mode: str = "HTML"):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram not configured, skipping.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram error: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"Telegram exception: {e}")
+
+
+# ==================================================
+# فرمت قیمت
 # ==================================================
 def fmt_price(p):
     p = float(p)
@@ -47,6 +64,9 @@ def fmt_price(p):
     return f"{p:.6f}"
 
 
+# ==================================================
+# توابع وضعیت
+# ==================================================
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -74,45 +94,7 @@ def log_trade(trade):
 
 
 # ==================================================
-# کندل بسته‌نشده
-# ==================================================
-def drop_unclosed_candle(df):
-    if not ONLY_CLOSED_CANDLES or len(df) == 0:
-        return df
-    now = pd.Timestamp.now()
-    last_time = df["time"].iloc[-1]
-    if (now - last_time).total_seconds() < 3600:
-        return df.iloc[:-1].reset_index(drop=True)
-    return df
-
-
-# ==================================================
-# قیمت لحظه‌ای
-# ==================================================
-def get_live_price(symbol):
-    """
-    قیمت لحظه‌ای بازار.
-    این قیمت معادل open کندل بعدی در بک‌تست است،
-    چون لحظه بسته شدن کندل i دقیقاً لحظه باز شدن کندل i+1 است.
-    """
-    try:
-        url = f"https://apiv2.nobitex.ir/v2/orderbook/{symbol}"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if data.get("status") == "ok":
-            asks = data.get("asks", [])
-            bids = data.get("bids", [])
-            return (
-                float(bids[0][0]) if bids else None,
-                float(asks[0][0]) if asks else None,
-            )
-    except Exception:
-        return None, None
-    return None, None
-
-
-# ==================================================
-# دریافت کندل‌ها
+# دریافت داده
 # ==================================================
 _cache = {"time": 0, "df": None}
 
@@ -145,6 +127,19 @@ def fetch_candles(symbol, limit=500, cache_seconds=60):
 
 
 # ==================================================
+# کندل بسته‌نشده
+# ==================================================
+def drop_unclosed_candle(df):
+    if len(df) == 0:
+        return df
+    now = pd.Timestamp.now()
+    last_time = df["time"].iloc[-1]
+    if (now - last_time).total_seconds() < 3600:
+        return df.iloc[:-1].reset_index(drop=True)
+    return df
+
+
+# ==================================================
 # اندیکاتورها
 # ==================================================
 def calculate_indicators(df):
@@ -153,7 +148,7 @@ def calculate_indicators(df):
     hc = (df["high"] - df["close"].shift()).abs()
     lc = (df["low"]  - df["close"].shift()).abs()
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-    df["atr"] = tr.rolling(window=14).mean()
+    df["atr"] = tr.rolling(14).mean()
 
     up  = df["high"] - df["high"].shift()
     dn  = df["low"].shift() - df["low"]
@@ -165,9 +160,9 @@ def calculate_indicators(df):
     dx   = 100 * (pdi - mdi).abs() / (pdi + mdi)
     df["adx"] = dx.ewm(span=14, adjust=False).mean()
 
-    df["vol_avg"]       = df["volume"].rolling(window=20).mean()
-    df["donchian_high"] = df["high"].rolling(window=DONCHIAN_IN).max().shift(1)
-    df["donchian_low"]  = df["low"].rolling(window=DONCHIAN_OUT).min().shift(1)
+    df["vol_avg"]       = df["volume"].rolling(20).mean()
+    df["donchian_high"] = df["high"].rolling(DONCHIAN_IN).max().shift(1)
+    df["donchian_low"]  = df["low"].rolling(DONCHIAN_OUT).min().shift(1)
 
     return df.dropna().reset_index(drop=True)
 
@@ -180,8 +175,7 @@ def update_trailing_stop(state, latest):
         return state
     if latest["high"] > state["highest_price"]:
         state["highest_price"] = latest["high"]
-    atr_ref = latest["atr"] if USE_DYNAMIC_ATR else state["entry_atr"]
-    new_sl  = state["highest_price"] - (TRAILING_ATR * atr_ref)
+    new_sl = state["highest_price"] - (TRAILING_ATR * state["entry_atr"])
     if new_sl > state["stop_loss"]:
         state["stop_loss"] = new_sl
     return state
@@ -198,25 +192,10 @@ def check_entry(latest):
 def check_exit(state, latest):
     if not state["in_position"]:
         return None
-
-    # ۱. Stop Loss (تشخیص با Low — مثل بک‌تست)
     if latest["low"] <= state["stop_loss"]:
         return "STOP_LOSS"
-
-    # ۲. شکست Donchian
     if latest["close"] < latest["donchian_low"]:
         return "BREAKDOWN"
-
-    # ۳. Timeout (فقط اگه فعال باشه)
-    if MAX_HOLD_HOURS and state.get("entry_time"):
-        try:
-            entry_dt = pd.to_datetime(state["entry_time"])
-            hours = (pd.to_datetime(latest["time"]) - entry_dt).total_seconds() / 3600
-            if hours >= MAX_HOLD_HOURS:
-                return "TIMEOUT"
-        except Exception:
-            pass
-
     return None
 
 
@@ -233,18 +212,16 @@ def calc_pnl(state, exit_price):
 # ==================================================
 # اجرای یک‌باره
 # ==================================================
-def run_once(auto_trade=False):
-    """
-    auto_trade=True → معامله خودکار انجام می‌شود
-    auto_trade=False → فقط سیگنال را نشان می‌دهد
-    """
+def run_once():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{now_str}] Checking {COIN}...")
 
     state = load_state()
     df_raw = fetch_candles(SYMBOL, limit=500)
     if df_raw is None or len(df_raw) < 100:
-        print("  No data")
+        msg = f"⚠️ <b>خطا در دریافت داده</b>\nزمان: {now_str}"
+        send_telegram(msg)
+        print("No data")
         return
 
     df = calculate_indicators(drop_unclosed_candle(df_raw))
@@ -253,22 +230,60 @@ def run_once(auto_trade=False):
     # ===== جلوگیری از پردازش تکراری =====
     candle_key = str(latest["time"])
     if state.get("last_candle_time") == candle_key:
-        print(f"  Already processed: {candle_key}")
+        print(f"Already processed: {candle_key}")
         return
-
-    print(f"  Candle: {latest['time']} | Close: {fmt_price(latest['close'])} | "
-          f"ADX: {latest['adx']:.1f} | Donchian: {fmt_price(latest['donchian_high'])}")
 
     # ===== به‌روزرسانی Trailing =====
     update_trailing_stop(state, latest)
     save_state(state)
 
-    # ===== خروج =====
+    # ===== لاگ پایه =====
+    log_msg = (
+        f"📊 <b>بررسی {COIN}</b>\n"
+        f"زمان: {now_str}\n"
+        f"قیمت: {fmt_price(latest['close'])} ریال\n"
+        f"ADX: {latest['adx']:.1f}\n"
+        f"سقف دونچیان: {fmt_price(latest['donchian_high'])}\n"
+        f"وضعیت: {'در معامله' if state['in_position'] else 'خارج از معامله'}"
+    )
+
+    # ===== بررسی سیگنال ورود =====
+    if not state["in_position"] and check_entry(latest):
+        entry_price = latest["close"] * (1 + SLIPPAGE)
+        trade_value = state["capital"] * POSITION_PCT
+        position_size = (trade_value * (1 - FEE / 2)) / entry_price
+
+        state.update({
+            "in_position": True,
+            "entry_price": entry_price,
+            "entry_time": str(latest["time"]),
+            "entry_atr": latest["atr"],
+            "highest_price": entry_price,
+            "stop_loss": entry_price - (TRAILING_ATR * latest["atr"]),
+            "position_size": position_size,
+            "last_candle_time": candle_key,
+        })
+        save_state(state)
+
+        msg = (
+            f"🟢 <b>سیگنال خرید (BUY)</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"💰 قیمت ورود: <b>{fmt_price(entry_price)}</b> ریال\n"
+            f"📦 حجم: <b>{position_size:.4f}</b> {COIN}\n"
+            f"💵 ارزش: <b>{trade_value:,.0f}</b> ریال\n"
+            f"🛡️ حد ضرر: {fmt_price(state['stop_loss'])}\n"
+            f"⏰ زمان: {now_str}\n"
+            f"━━━━━━━━━━━━━━━"
+        )
+        send_telegram(msg)
+        print(f">>> BUY @ {fmt_price(entry_price)}")
+        return
+
+    # ===== بررسی سیگنال خروج =====
     if state["in_position"]:
         reason = check_exit(state, latest)
         if reason:
-            bid, _ = get_live_price(SYMBOL)
-            exit_price = (bid if bid else latest["close"]) * (1 - SLIPPAGE)
+            exit_price = latest["close"] * (1 - SLIPPAGE)
             net_pnl, profit_pct = calc_pnl(state, exit_price)
             state["capital"] += net_pnl
 
@@ -284,70 +299,40 @@ def run_once(auto_trade=False):
                 "reason":      reason,
             }
             log_trade(trade)
-            print(f"  <<< SELL [{reason}] @ {fmt_price(exit_price)} | "
-                  f"P/L: {net_pnl:+,.0f} ({profit_pct:+.2f}%)")
+
+            color = "🟢" if net_pnl > 0 else "🔴"
+            msg = (
+                f"{color} <b>سیگنال فروش (SELL)</b>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💰 قیمت خروج: <b>{fmt_price(exit_price)}</b> ریال\n"
+                f"📊 سود/ضرر: <b>{net_pnl:+,.0f}</b> ریال ({profit_pct:+.2f}%)\n"
+                f"📝 دلیل: {reason}\n"
+                f"💼 سرمایه جدید: {state['capital']:,.0f} ریال\n"
+                f"⏰ زمان: {now_str}\n"
+                f"━━━━━━━━━━━━━━━"
+            )
+            send_telegram(msg)
 
             state.update({
                 "in_position": False, "entry_price": 0, "entry_time": None,
-                "stop_loss": 0, "highest_price": 0, "entry_atr": 0, "position_size": 0,
+                "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
+                "position_size": 0,
             })
-            state["last_candle_time"] = candle_key
             save_state(state)
+            print(f"<<< SELL [{reason}] @ {fmt_price(exit_price)}")
             return
 
-    # ===== ورود =====
-    else:
-        if check_entry(latest):
-            _, ask = get_live_price(SYMBOL)
-            entry_price = (ask if ask else latest["close"]) * (1 + SLIPPAGE)
-
-            pct = state.get("position_pct", POSITION_PCT)
-            trade_value = state["capital"] * pct
-            position_size = (trade_value * (1 - FEE / 2)) / entry_price
-
-            if auto_trade:
-                state.update({
-                    "in_position": True,
-                    "entry_price": entry_price,
-                    "entry_time":  str(latest["time"]),
-                    "entry_atr":   latest["atr"],
-                    "highest_price": entry_price,
-                    "stop_loss":   entry_price - (TRAILING_ATR * latest["atr"]),
-                    "position_size": position_size,
-                })
-                print(f"  >>> BUY @ {fmt_price(entry_price)} | "
-                      f"Size: {position_size:.6f} | Value: {trade_value:,.0f}")
-            else:
-                print(f"  ⚠️ SIGNAL BUY (auto_trade off) @ {fmt_price(entry_price)}")
-
+    # ===== اگر سیگنالی نبود =====
     state["last_candle_time"] = candle_key
     save_state(state)
+
+    # ===== هر ساعت لاگ بفرست =====
+    send_telegram(log_msg + "\n\n⏳ سیگنالی نیست")
+    print("No signal")
 
 
 # ==================================================
 # اجرا
 # ==================================================
 if __name__ == "__main__":
-    import sys
-    auto = "--auto" in sys.argv
-
-    if "once" in sys.argv:
-        run_once(auto_trade=auto)
-    else:
-        print(f"Paper Trader started (auto={auto}). Press Ctrl+C to stop.\n")
-        while True:
-            try:
-                run_once(auto_trade=auto)
-                now = datetime.now()
-                next_hour = (now.replace(minute=1, second=0, microsecond=0)
-                             + pd.Timedelta(hours=1))
-                wait = (next_hour - now).total_seconds()
-                if wait < 0:
-                    wait += 3600
-                print(f"  Sleeping {int(wait)}s...")
-                time.sleep(wait)
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error: {e}")
-                time.sleep(60)
+    run_once()
