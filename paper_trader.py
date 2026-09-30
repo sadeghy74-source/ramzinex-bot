@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import base64
 import requests
 import pandas as pd
 from datetime import datetime
@@ -55,6 +56,67 @@ def send_telegram(message: str, parse_mode: str = "HTML"):
 
 
 # ==================================================
+# تست کلید API نوبیتکس
+# ==================================================
+def test_api_key():
+    """تست اتصال به API نوبیتکس و نمایش موجودی"""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        print("PyNaCl not installed")
+        return False
+
+    def pad_b64(s):
+        return s + "=" * (-len(s) % 4)
+
+    try:
+        private_bytes = base64.urlsafe_b64decode(pad_b64(PRIVATE_KEY))
+        signing_key = SigningKey(private_bytes)
+
+        method = "POST"
+        full_path = "/users/wallets/list"
+        url = "https://apiv2.nobitex.ir" + full_path
+        body = {"type": "spot"}
+        body_json = json.dumps(body, separators=(',', ':'))
+        timestamp = str(int(time.time()))
+        message = f"{timestamp}{method}{full_path}{body_json}"
+
+        signature = signing_key.sign(message.encode('utf-8'))
+        sig_b64 = base64.urlsafe_b64encode(signature.signature).decode('utf-8')
+
+        headers = {
+            "Nobitex-Key": pad_b64(PUBLIC_KEY),
+            "Nobitex-Signature": sig_b64,
+            "Nobitex-Timestamp": timestamp,
+            "Content-Type": "application/json",
+            "User-Agent": "TraderBot/1.0",
+        }
+
+        r = requests.post(url, data=body_json, headers=headers, timeout=15)
+        data = r.json()
+
+        if r.status_code == 200 and data.get("status") == "ok":
+            # ===== استخراج موجودی =====
+            wallets_info = []
+            for w in data.get("wallets", []):
+                if w["currency"] in ["rls", "doge", "usdt"]:
+                    wallets_info.append(
+                        f"  {w['currency']}: {float(w['balance']):,.4f}"
+                    )
+            if wallets_info:
+                print("Wallets:")
+                for info in wallets_info:
+                    print(info)
+            return True
+        else:
+            print(f"API test failed: {r.status_code} {data}")
+            return False
+    except Exception as e:
+        print(f"API test error: {e}")
+        return False
+
+
+# ==================================================
 # فرمت قیمت
 # ==================================================
 def fmt_price(p):
@@ -65,7 +127,7 @@ def fmt_price(p):
 
 
 # ==================================================
-# نوار پیشرفت (برای نمایش نزدیکی به شرط)
+# نوار پیشرفت
 # ==================================================
 def progress_bar(pct, length=10):
     filled = int(round(pct / 100 * length))
@@ -227,7 +289,7 @@ def calc_pnl(state, exit_price):
 
 
 # ==================================================
-# ساخت پیام وضعیت (با درصد نزدیکی)
+# ساخت پیام وضعیت
 # ==================================================
 def build_status_message(latest, now_str, state):
     price       = latest["close"]
@@ -237,12 +299,10 @@ def build_status_message(latest, now_str, state):
     vol_avg     = latest["vol_avg"]
     vol_ratio   = volume / vol_avg if vol_avg > 0 else 0
 
-    # ===== درصد نزدیکی به هر شرط =====
     price_pct   = min(100, (price / donchian * 100)) if donchian > 0 else 0
     adx_pct     = min(100, (adx / ADX_MIN * 100))
     vol_pct     = min(100, (vol_ratio / VOL_MULT * 100))
 
-    # ===== امتیاز کل =====
     total_pct   = (price_pct + adx_pct + vol_pct) / 3
 
     msg = (
@@ -283,6 +343,11 @@ def build_status_message(latest, now_str, state):
 def run_once():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{now_str}] Checking {COIN}...")
+
+    # ===== تست API =====
+    if not test_api_key():
+        send_telegram(f"⚠️ <b>خطای کلید API</b>\nزمان: {now_str}")
+        return
 
     state = load_state()
     df_raw = fetch_candles(SYMBOL, limit=500)
@@ -383,7 +448,7 @@ def run_once():
     state["last_candle_time"] = candle_key
     save_state(state)
 
-    # ===== پیام وضعیت با درصد نزدیکی =====
+    # ===== پیام وضعیت =====
     status_msg = build_status_message(latest, now_str, state)
     send_telegram(status_msg)
     print("No signal — status sent")
