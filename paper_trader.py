@@ -14,7 +14,7 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==================================================
-# پارامترهای استراتژی (بهینه DOGE)
+# تنظیمات
 # ==================================================
 COIN         = "DOGE"
 SYMBOL       = "DOGEIRT"
@@ -29,17 +29,22 @@ SLIPPAGE        = 0.001
 INITIAL_CAPITAL = 20_000_000
 POSITION_PCT    = 1.0
 
+# ===== تنظیمات معامله واقعی =====
+REAL_TRADING_ENABLED = True
+MAX_ORDER_RLS        = 100_000
+PENDING_TIMEOUT_MIN  = 30
+
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
 
 
 # ==================================================
-# ارسال پیام به تلگرام
+# تلگرام
 # ==================================================
-def send_telegram(message: str, parse_mode: str = "HTML"):
+def send_telegram(message: str, parse_mode: str = "HTML", reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured, skipping.")
-        return
+        print("Telegram not configured")
+        return None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -47,77 +52,135 @@ def send_telegram(message: str, parse_mode: str = "HTML"):
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram error: {r.status_code} {r.text}")
+        data = r.json()
+        if r.status_code == 200 and data.get("ok"):
+            return data["result"]["message_id"]
+        else:
+            print(f"Telegram error: {r.status_code} {data}")
     except Exception as e:
         print(f"Telegram exception: {e}")
+    return None
 
 
-# ==================================================
-# تست کلید API نوبیتکس
-# ==================================================
-def test_api_key():
-    """تست اتصال به API نوبیتکس و نمایش موجودی"""
+def edit_telegram(message_id, new_text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "text": new_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    else:
+        payload["reply_markup"] = {"inline_keyboard": []}
     try:
-        from nacl.signing import SigningKey
-    except ImportError:
-        print("PyNaCl not installed")
-        return False
+        requests.post(url, json=payload, timeout=10)
+    except Exception:
+        pass
 
-    def pad_b64(s):
-        return s + "=" * (-len(s) % 4)
 
+def get_updates(offset=0):
+    if not TELEGRAM_TOKEN:
+        return []
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 0, "offset": offset}
     try:
-        private_bytes = base64.urlsafe_b64decode(pad_b64(PRIVATE_KEY))
-        signing_key = SigningKey(private_bytes)
-
-        method = "POST"
-        full_path = "/users/wallets/list"
-        url = "https://apiv2.nobitex.ir" + full_path
-        body = {"type": "spot"}
-        body_json = json.dumps(body, separators=(',', ':'))
-        timestamp = str(int(time.time()))
-        message = f"{timestamp}{method}{full_path}{body_json}"
-
-        signature = signing_key.sign(message.encode('utf-8'))
-        sig_b64 = base64.urlsafe_b64encode(signature.signature).decode('utf-8')
-
-        headers = {
-            "Nobitex-Key": pad_b64(PUBLIC_KEY),
-            "Nobitex-Signature": sig_b64,
-            "Nobitex-Timestamp": timestamp,
-            "Content-Type": "application/json",
-            "User-Agent": "TraderBot/1.0",
-        }
-
-        r = requests.post(url, data=body_json, headers=headers, timeout=15)
+        r = requests.get(url, params=params, timeout=15)
         data = r.json()
+        if data.get("ok"):
+            return data.get("result", [])
+    except Exception:
+        pass
+    return []
 
-        if r.status_code == 200 and data.get("status") == "ok":
-            # ===== استخراج موجودی =====
-            wallets_info = []
-            for w in data.get("wallets", []):
-                if w["currency"] in ["rls", "doge", "usdt"]:
-                    wallets_info.append(
-                        f"  {w['currency']}: {float(w['balance']):,.4f}"
-                    )
-            if wallets_info:
-                print("Wallets:")
-                for info in wallets_info:
-                    print(info)
-            return True
-        else:
-            print(f"API test failed: {r.status_code} {data}")
-            return False
-    except Exception as e:
-        print(f"API test error: {e}")
-        return False
+
+def answer_callback(callback_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+    try:
+        requests.post(url, json={
+            "callback_query_id": callback_id,
+            "text": text,
+        }, timeout=10)
+    except Exception:
+        pass
 
 
 # ==================================================
-# فرمت قیمت
+# نوبیتکس
+# ==================================================
+def pad_b64(s):
+    return s + "=" * (-len(s) % 4)
+
+
+def _sign_and_send(method, path, body):
+    from nacl.signing import SigningKey
+    private_bytes = base64.urlsafe_b64decode(pad_b64(PRIVATE_KEY))
+    signing_key   = SigningKey(private_bytes)
+    body_json = json.dumps(body, separators=(',', ':'))
+    timestamp = str(int(time.time()))
+    message   = f"{timestamp}{method}{path}{body_json}"
+    signature = signing_key.sign(message.encode('utf-8'))
+    sig_b64   = base64.urlsafe_b64encode(signature.signature).decode('utf-8')
+    headers = {
+        "Nobitex-Key": pad_b64(PUBLIC_KEY),
+        "Nobitex-Signature": sig_b64,
+        "Nobitex-Timestamp": timestamp,
+        "Content-Type": "application/json",
+        "User-Agent": "TraderBot/1.0",
+    }
+    url = "https://apiv2.nobitex.ir" + path
+    if method == "GET":
+        r = requests.get(url, headers=headers, timeout=15)
+    else:
+        r = requests.post(url, data=body_json, headers=headers, timeout=15)
+    return r.status_code, r.json()
+
+
+def get_wallets():
+    try:
+        code, data = _sign_and_send("POST", "/users/wallets/list", {"type": "spot"})
+        if code == 200 and data.get("status") == "ok":
+            wallets = {}
+            for w in data.get("wallets", []):
+                wallets[w["currency"]] = float(w["balance"])
+            return wallets
+    except Exception as e:
+        print(f"get_wallets error: {e}")
+    return {}
+
+
+def place_market_buy(amount_rls):
+    body = {
+        "type": "buy",
+        "execution": "market",
+        "market": SYMBOL,
+        "amount": int(amount_rls),
+        "price": 0,
+    }
+    code, data = _sign_and_send("POST", "/market/orders/add", body)
+    return code, data
+
+
+def place_market_sell(amount_doge):
+    body = {
+        "type": "sell",
+        "execution": "market",
+        "market": SYMBOL,
+        "amount": float(amount_doge),
+        "price": 0,
+    }
+    code, data = _sign_and_send("POST", "/market/orders/add", body)
+    return code, data
+
+
+# ==================================================
+# کمکی
 # ==================================================
 def fmt_price(p):
     p = float(p)
@@ -126,9 +189,6 @@ def fmt_price(p):
     return f"{p:.6f}"
 
 
-# ==================================================
-# نوار پیشرفت
-# ==================================================
 def progress_bar(pct, length=10):
     filled = int(round(pct / 100 * length))
     filled = max(0, min(length, filled))
@@ -144,7 +204,7 @@ def status_emoji(pct):
 
 
 # ==================================================
-# توابع وضعیت
+# State
 # ==================================================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -156,6 +216,8 @@ def load_state():
         "capital": INITIAL_CAPITAL, "initial_capital": INITIAL_CAPITAL,
         "position_pct": POSITION_PCT, "position_size": 0,
         "last_candle_time": None,
+        "last_update_id": 0,
+        "pending": None,
     }
 
 
@@ -173,9 +235,10 @@ def log_trade(trade):
 
 
 # ==================================================
-# دریافت داده
+# داده و اندیکاتورها
 # ==================================================
 _cache = {"time": 0, "df": None}
+
 
 def fetch_candles(symbol, limit=500, cache_seconds=60):
     now_ts = time.time()
@@ -205,9 +268,6 @@ def fetch_candles(symbol, limit=500, cache_seconds=60):
     return _cache["df"]
 
 
-# ==================================================
-# کندل بسته‌نشده
-# ==================================================
 def drop_unclosed_candle(df):
     if len(df) == 0:
         return df
@@ -218,9 +278,6 @@ def drop_unclosed_candle(df):
     return df
 
 
-# ==================================================
-# اندیکاتورها
-# ==================================================
 def calculate_indicators(df):
     df = df.copy()
     hl = df["high"] - df["low"]
@@ -247,7 +304,7 @@ def calculate_indicators(df):
 
 
 # ==================================================
-# منطق معاملات
+# منطق
 # ==================================================
 def update_trailing_stop(state, latest):
     if not state["in_position"]:
@@ -278,20 +335,11 @@ def check_exit(state, latest):
     return None
 
 
-def calc_pnl(state, exit_price):
-    entry_value = state["entry_price"] * state["position_size"]
-    exit_value  = exit_price * state["position_size"]
-    gross_pnl   = exit_value - entry_value
-    fee_amount  = (entry_value + exit_value) * (FEE / 2)
-    net_pnl     = gross_pnl - fee_amount
-    profit_pct  = (net_pnl / entry_value) * 100
-    return net_pnl, profit_pct
-
-
 # ==================================================
-# ساخت پیام وضعیت
+# ساخت پیام وضعیت + دکمه‌ها (همیشه نمایش)
 # ==================================================
-def build_status_message(latest, now_str, state):
+def build_status_with_buttons(latest, now_str, state):
+    """پیام وضعیت با دکمه‌های همیشه‌نمایان"""
     price       = latest["close"]
     donchian    = latest["donchian_high"]
     adx         = latest["adx"]
@@ -302,30 +350,41 @@ def build_status_message(latest, now_str, state):
     price_pct   = min(100, (price / donchian * 100)) if donchian > 0 else 0
     adx_pct     = min(100, (adx / ADX_MIN * 100))
     vol_pct     = min(100, (vol_ratio / VOL_MULT * 100))
-
     total_pct   = (price_pct + adx_pct + vol_pct) / 3
 
+    # ===== وضعیت دکمه‌ها =====
+    buy_ok = (
+        latest["close"] > latest["donchian_high"] and
+        latest["adx"] > ADX_MIN and
+        latest["volume"] > (VOL_MULT * latest["vol_avg"])
+    )
+    sell_ok = state["in_position"]
+
+    # ===== متن =====
     msg = (
         f"📊 <b>بررسی {COIN}</b>\n"
         f"🕐 {now_str}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💰 قیمت: <b>{fmt_price(price)}</b> ریال\n"
-        f"\n"
+        f"💰 قیمت: <b>{fmt_price(price)}</b> ریال\n\n"
         f"<b>شرایط ورود:</b>\n"
         f"{status_emoji(price_pct)} قیمت vs سقف: <b>{price_pct:.1f}%</b>\n"
         f"   <code>{progress_bar(price_pct)}</code>\n"
-        f"   هدف: {fmt_price(donchian)}\n"
-        f"\n"
+        f"   هدف: {fmt_price(donchian)}\n\n"
         f"{status_emoji(adx_pct)} ADX: <b>{adx:.1f}</b> / {ADX_MIN} (<b>{adx_pct:.1f}%</b>)\n"
-        f"   <code>{progress_bar(adx_pct)}</code>\n"
-        f"\n"
+        f"   <code>{progress_bar(adx_pct)}</code>\n\n"
         f"{status_emoji(vol_pct)} حجم: <b>{vol_ratio:.2f}x</b> / {VOL_MULT}x (<b>{vol_pct:.1f}%</b>)\n"
         f"   <code>{progress_bar(vol_pct)}</code>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🎯 <b>آمادگی کل: {total_pct:.1f}%</b>\n"
     )
 
-    if total_pct >= 90:
+    if state["in_position"]:
+        msg += (
+            f"\n🟢 <b>در معامله</b>\n"
+            f"💰 ورود: {fmt_price(state['entry_price'])}\n"
+            f"🛡️ حد ضرر: {fmt_price(state['stop_loss'])}\n"
+        )
+    elif total_pct >= 90:
         msg += "\n⚡ <b>نزدیک سیگنال!</b>"
     elif total_pct >= 70:
         msg += "\n🔥 در حال نزدیک شدن..."
@@ -334,124 +393,240 @@ def build_status_message(latest, now_str, state):
     else:
         msg += "\n😴 بازار آرام"
 
-    return msg
+    # ===== دکمه‌ها =====
+    buy_label  = "🟢 خرید (BUY)" if buy_ok else "🔒 خرید (غیرفعال)"
+    sell_label = "🔴 فروش (SELL)" if sell_ok else "🔒 فروش (غیرفعال)"
+
+    buy_cb  = "confirm_buy"  if buy_ok  else "disabled_buy"
+    sell_cb = "confirm_sell" if sell_ok else "disabled_sell"
+
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": buy_label,  "callback_data": buy_cb},
+            {"text": sell_label, "callback_data": sell_cb},
+        ]]
+    }
+
+    return msg, keyboard, buy_ok, sell_ok
 
 
 # ==================================================
-# اجرای یک‌باره
+# Callback ها
+# ==================================================
+def process_callbacks(state):
+    offset = state.get("last_update_id", 0) + 1
+    updates = get_updates(offset=offset)
+    if not updates:
+        return state
+
+    for upd in updates:
+        state["last_update_id"] = upd["update_id"]
+
+        if "callback_query" not in upd:
+            continue
+
+        cb = upd["callback_query"]
+        cb_id = cb["id"]
+        data  = cb.get("data", "")
+        msg_id = cb["message"]["message_id"]
+        pending = state.get("pending")
+
+        # ===== دکمه غیرفعال =====
+        if data in ("disabled_buy", "disabled_sell"):
+            answer_callback(cb_id, "❌ شرایط هنوز فراهم نیست")
+            continue
+
+        # ===== بررسی pending =====
+        if not pending:
+            answer_callback(cb_id, "❌ ابتدا باید /run رو بزنی")
+            continue
+
+        # ===== timeout =====
+        pending_time = datetime.fromisoformat(pending["time"])
+        age_min = (datetime.now() - pending_time).total_seconds() / 60
+        if age_min > PENDING_TIMEOUT_MIN:
+            answer_callback(cb_id, "❌ منقضی شده")
+            edit_telegram(msg_id, "❌ <b>منقضی شد — دوباره اجرا کن</b>")
+            state["pending"] = None
+            continue
+
+        # ===== تأیید خرید =====
+        if data == "confirm_buy":
+            answer_callback(cb_id, "⏳ در حال ارسال سفارش...")
+            amount_rls = pending["amount_rls"]
+            code, res = place_market_buy(amount_rls)
+
+            if code == 200 and res.get("status") == "ok":
+                order = res.get("order", {})
+                order_id = order.get("id", "?")
+                filled_price = order.get("price", pending["price"])
+
+                state["in_position"]   = True
+                state["entry_price"]   = float(filled_price) if filled_price else pending["price"]
+                state["entry_time"]    = str(pending["time"])
+                state["entry_atr"]     = pending["atr"]
+                state["highest_price"] = pending["price"]
+                state["stop_loss"]     = pending["price"] - (TRAILING_ATR * pending["atr"])
+                state["position_size"] = pending["size"]
+                state["pending"]       = None
+                save_state(state)
+
+                new_text = (
+                    f"✅ <b>خرید انجام شد</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"🆔 سفارش: <code>{order_id}</code>\n"
+                    f"💰 قیمت: {fmt_price(filled_price)}\n"
+                    f"📦 حجم: {pending['size']:.4f} {COIN}\n"
+                    f"💵 مبلغ: {amount_rls:,.0f} ریال\n"
+                    f"🛡️ حد ضرر: {fmt_price(state['stop_loss'])}"
+                )
+                edit_telegram(msg_id, new_text)
+                send_telegram(new_text)
+            else:
+                err = res.get("message", str(res))
+                edit_telegram(msg_id, f"❌ <b>خطا</b>\n{err}")
+                state["pending"] = None
+                save_state(state)
+
+        # ===== لغو =====
+        elif data == "cancel_buy":
+            answer_callback(cb_id, "❌ لغو شد")
+            edit_telegram(msg_id, "❌ <b>لغو شد</b>")
+            state["pending"] = None
+
+        # ===== تأیید فروش =====
+        elif data == "confirm_sell":
+            answer_callback(cb_id, "⏳ در حال فروش...")
+
+            wallets = get_wallets()
+            doge_balance = wallets.get("doge", 0)
+            if doge_balance <= 0:
+                edit_telegram(msg_id, "❌ <b>موجودی DOGE صفره</b>")
+                state["pending"] = None
+                continue
+
+            code, res = place_market_sell(doge_balance)
+            if code == 200 and res.get("status") == "ok":
+                order = res.get("order", {})
+                order_id = order.get("id", "?")
+                filled_price = float(order.get("price", 0))
+
+                entry_value = state["entry_price"] * state["position_size"]
+                exit_value  = filled_price * doge_balance
+                gross_pnl   = exit_value - entry_value
+                fee_amount  = (entry_value + exit_value) * (FEE / 2)
+                net_pnl     = gross_pnl - fee_amount
+                profit_pct  = (net_pnl / entry_value * 100) if entry_value > 0 else 0
+
+                state["capital"] = state.get("capital", INITIAL_CAPITAL) + net_pnl
+                log_trade({
+                    "entry_time":  state.get("entry_time"),
+                    "exit_time":   str(datetime.now()),
+                    "entry":       round(state["entry_price"], 6),
+                    "exit":        round(filled_price, 6),
+                    "size":        round(doge_balance, 6),
+                    "profit_rial": round(net_pnl, 2),
+                    "profit_%":    round(profit_pct, 3),
+                    "capital":     round(state["capital"], 2),
+                    "reason":      "MANUAL_SELL",
+                })
+
+                state.update({
+                    "in_position": False, "entry_price": 0, "entry_time": None,
+                    "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
+                    "position_size": 0, "pending": None,
+                })
+                save_state(state)
+
+                color = "🟢" if net_pnl > 0 else "🔴"
+                new_text = (
+                    f"{color} <b>فروش انجام شد</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"🆔 سفارش: <code>{order_id}</code>\n"
+                    f"💰 قیمت فروش: {fmt_price(filled_price)}\n"
+                    f"📊 سود/ضرر: {net_pnl:+,.0f} ریال ({profit_pct:+.2f}%)\n"
+                    f"💼 سرمایه: {state['capital']:,.0f} ریال"
+                )
+                edit_telegram(msg_id, new_text)
+                send_telegram(new_text)
+            else:
+                err = res.get("message", str(res))
+                edit_telegram(msg_id, f"❌ <b>خطا</b>\n{err}")
+                state["pending"] = None
+                save_state(state)
+
+        # ===== لغو فروش =====
+        elif data == "cancel_sell":
+            answer_callback(cb_id, "❌ لغو شد")
+            edit_telegram(msg_id, "❌ <b>لغو شد</b>")
+            state["pending"] = None
+
+    save_state(state)
+    return state
+
+
+# ==================================================
+# اجرا
 # ==================================================
 def run_once():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{now_str}] Checking {COIN}...")
 
-    # ===== تست API =====
-    if not test_api_key():
-        send_telegram(f"⚠️ <b>خطای کلید API</b>\nزمان: {now_str}")
-        return
-
     state = load_state()
+
+    # ===== ۱. پردازش callback ها =====
+    try:
+        state = process_callbacks(state)
+    except Exception as e:
+        print(f"Callback error: {e}")
+
+    # ===== ۲. داده =====
     df_raw = fetch_candles(SYMBOL, limit=500)
     if df_raw is None or len(df_raw) < 100:
-        send_telegram(f"⚠️ <b>خطا در دریافت داده</b>\nزمان: {now_str}")
         print("No data")
         return
 
     df = calculate_indicators(drop_unclosed_candle(df_raw))
     latest = df.iloc[-1]
 
-    # ===== جلوگیری از پردازش تکراری =====
-    candle_key = str(latest["time"])
-    if state.get("last_candle_time") == candle_key:
-        print(f"Already processed: {candle_key}")
-        return
-
-    # ===== به‌روزرسانی Trailing =====
+    # ===== ۳. Trailing =====
     update_trailing_stop(state, latest)
     save_state(state)
 
-    # ===== بررسی سیگنال ورود =====
-    if not state["in_position"] and check_entry(latest):
+    # ===== ۴. ساخت پیام + دکمه =====
+    msg, keyboard, buy_ok, sell_ok = build_status_with_buttons(latest, now_str, state)
+
+    # ===== ۵. ثبت pending اگه سیگنال معتبر =====
+    if buy_ok and not state["in_position"]:
         entry_price = latest["close"] * (1 + SLIPPAGE)
         trade_value = state["capital"] * POSITION_PCT
         position_size = (trade_value * (1 - FEE / 2)) / entry_price
+        amount_rls = min(trade_value, MAX_ORDER_RLS)
 
-        state.update({
-            "in_position": True,
-            "entry_price": entry_price,
-            "entry_time": str(latest["time"]),
-            "entry_atr": latest["atr"],
-            "highest_price": entry_price,
-            "stop_loss": entry_price - (TRAILING_ATR * latest["atr"]),
-            "position_size": position_size,
-            "last_candle_time": candle_key,
-        })
+        state["pending"] = {
+            "action":      "BUY",
+            "price":       entry_price,
+            "size":        position_size,
+            "amount_rls":  amount_rls,
+            "atr":         latest["atr"],
+            "time":        datetime.now().isoformat(),
+        }
         save_state(state)
+        print(f">>> SIGNAL READY (BUY) @ {fmt_price(entry_price)}")
 
-        msg = (
-            f"🟢 <b>سیگنال خرید (BUY)</b>\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💰 قیمت ورود: <b>{fmt_price(entry_price)}</b> ریال\n"
-            f"📦 حجم: <b>{position_size:.4f}</b> {COIN}\n"
-            f"💵 ارزش: <b>{trade_value:,.0f}</b> ریال\n"
-            f"🛡️ حد ضرر: {fmt_price(state['stop_loss'])}\n"
-            f"⏰ زمان: {now_str}\n"
-            f"━━━━━━━━━━━━━━━"
-        )
-        send_telegram(msg)
-        print(f">>> BUY @ {fmt_price(entry_price)}")
-        return
+    elif sell_ok:
+        exit_price = latest["close"] * (1 - SLIPPAGE)
+        state["pending"] = {
+            "action":      "SELL",
+            "price":       exit_price,
+            "time":        datetime.now().isoformat(),
+        }
+        save_state(state)
+        print(f"<<< SIGNAL READY (SELL) @ {fmt_price(exit_price)}")
 
-    # ===== بررسی سیگنال خروج =====
-    if state["in_position"]:
-        reason = check_exit(state, latest)
-        if reason:
-            exit_price = latest["close"] * (1 - SLIPPAGE)
-            net_pnl, profit_pct = calc_pnl(state, exit_price)
-            state["capital"] += net_pnl
-
-            trade = {
-                "entry_time":  state["entry_time"],
-                "exit_time":   str(latest["time"]),
-                "entry":       round(state["entry_price"], 6),
-                "exit":        round(exit_price, 6),
-                "size":        round(state["position_size"], 6),
-                "profit_rial": round(net_pnl, 2),
-                "profit_%":    round(profit_pct, 3),
-                "capital":     round(state["capital"], 2),
-                "reason":      reason,
-            }
-            log_trade(trade)
-
-            color = "🟢" if net_pnl > 0 else "🔴"
-            msg = (
-                f"{color} <b>سیگنال فروش (SELL)</b>\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"💰 قیمت خروج: <b>{fmt_price(exit_price)}</b> ریال\n"
-                f"📊 سود/ضرر: <b>{net_pnl:+,.0f}</b> ریال ({profit_pct:+.2f}%)\n"
-                f"📝 دلیل: {reason}\n"
-                f"💼 سرمایه جدید: {state['capital']:,.0f} ریال\n"
-                f"⏰ زمان: {now_str}\n"
-                f"━━━━━━━━━━━━━━━"
-            )
-            send_telegram(msg)
-
-            state.update({
-                "in_position": False, "entry_price": 0, "entry_time": None,
-                "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
-                "position_size": 0,
-            })
-            save_state(state)
-            print(f"<<< SELL [{reason}] @ {fmt_price(exit_price)}")
-            return
-
-    # ===== اگر سیگنالی نبود =====
-    state["last_candle_time"] = candle_key
-    save_state(state)
-
-    # ===== پیام وضعیت =====
-    status_msg = build_status_message(latest, now_str, state)
-    send_telegram(status_msg)
-    print("No signal — status sent")
+    # ===== ۶. ارسال پیام =====
+    send_telegram(msg, reply_markup=keyboard)
+    print("Status sent")
 
 
 # ==================================================
