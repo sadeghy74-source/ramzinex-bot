@@ -2,7 +2,6 @@ name: Ramzinex Paper Trader
 
 on:
   schedule:
-    # اجرا هر ساعت در دقیقه ۵ (UTC)
     - cron: '5 * * * *'
   workflow_dispatch:
 
@@ -27,6 +26,8 @@ jobs:
         env:
           NOBITEX_PUBLIC_KEY: ${{ secrets.NOBITEX_PUBLIC_KEY }}
           NOBITEX_PRIVATE_KEY: ${{ secrets.NOBITEX_PRIVATE_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python paper_trader.py once
       
       - name: Commit state files
