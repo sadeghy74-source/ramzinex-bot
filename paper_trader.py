@@ -6,7 +6,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 
-# ===== خواندن کلیدها از متغیرهای محیطی =====
+# ===== خواندن کلیدها =====
 PUBLIC_KEY  = os.getenv("NOBITEX_PUBLIC_KEY")
 PRIVATE_KEY = os.getenv("NOBITEX_PRIVATE_KEY")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
@@ -62,6 +62,23 @@ def fmt_price(p):
     if p >= 1000: return f"{p:,.0f}"
     if p >= 1:    return f"{p:,.4f}"
     return f"{p:.6f}"
+
+
+# ==================================================
+# نوار پیشرفت (برای نمایش نزدیکی به شرط)
+# ==================================================
+def progress_bar(pct, length=10):
+    filled = int(round(pct / 100 * length))
+    filled = max(0, min(length, filled))
+    return "▰" * filled + "▱" * (length - filled)
+
+
+def status_emoji(pct):
+    if pct >= 100: return "✅"
+    if pct >= 75:  return "🟢"
+    if pct >= 50:  return "🟡"
+    if pct >= 25:  return "🟠"
+    return "🔴"
 
 
 # ==================================================
@@ -210,6 +227,57 @@ def calc_pnl(state, exit_price):
 
 
 # ==================================================
+# ساخت پیام وضعیت (با درصد نزدیکی)
+# ==================================================
+def build_status_message(latest, now_str, state):
+    price       = latest["close"]
+    donchian    = latest["donchian_high"]
+    adx         = latest["adx"]
+    volume      = latest["volume"]
+    vol_avg     = latest["vol_avg"]
+    vol_ratio   = volume / vol_avg if vol_avg > 0 else 0
+
+    # ===== درصد نزدیکی به هر شرط =====
+    price_pct   = min(100, (price / donchian * 100)) if donchian > 0 else 0
+    adx_pct     = min(100, (adx / ADX_MIN * 100))
+    vol_pct     = min(100, (vol_ratio / VOL_MULT * 100))
+
+    # ===== امتیاز کل =====
+    total_pct   = (price_pct + adx_pct + vol_pct) / 3
+
+    msg = (
+        f"📊 <b>بررسی {COIN}</b>\n"
+        f"🕐 {now_str}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💰 قیمت: <b>{fmt_price(price)}</b> ریال\n"
+        f"\n"
+        f"<b>شرایط ورود:</b>\n"
+        f"{status_emoji(price_pct)} قیمت vs سقف: <b>{price_pct:.1f}%</b>\n"
+        f"   <code>{progress_bar(price_pct)}</code>\n"
+        f"   هدف: {fmt_price(donchian)}\n"
+        f"\n"
+        f"{status_emoji(adx_pct)} ADX: <b>{adx:.1f}</b> / {ADX_MIN} (<b>{adx_pct:.1f}%</b>)\n"
+        f"   <code>{progress_bar(adx_pct)}</code>\n"
+        f"\n"
+        f"{status_emoji(vol_pct)} حجم: <b>{vol_ratio:.2f}x</b> / {VOL_MULT}x (<b>{vol_pct:.1f}%</b>)\n"
+        f"   <code>{progress_bar(vol_pct)}</code>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>آمادگی کل: {total_pct:.1f}%</b>\n"
+    )
+
+    if total_pct >= 90:
+        msg += "\n⚡ <b>نزدیک سیگنال!</b>"
+    elif total_pct >= 70:
+        msg += "\n🔥 در حال نزدیک شدن..."
+    elif total_pct >= 40:
+        msg += "\n⏳ در حال شکل‌گیری..."
+    else:
+        msg += "\n😴 بازار آرام"
+
+    return msg
+
+
+# ==================================================
 # اجرای یک‌باره
 # ==================================================
 def run_once():
@@ -219,8 +287,7 @@ def run_once():
     state = load_state()
     df_raw = fetch_candles(SYMBOL, limit=500)
     if df_raw is None or len(df_raw) < 100:
-        msg = f"⚠️ <b>خطا در دریافت داده</b>\nزمان: {now_str}"
-        send_telegram(msg)
+        send_telegram(f"⚠️ <b>خطا در دریافت داده</b>\nزمان: {now_str}")
         print("No data")
         return
 
@@ -236,16 +303,6 @@ def run_once():
     # ===== به‌روزرسانی Trailing =====
     update_trailing_stop(state, latest)
     save_state(state)
-
-    # ===== لاگ پایه =====
-    log_msg = (
-        f"📊 <b>بررسی {COIN}</b>\n"
-        f"زمان: {now_str}\n"
-        f"قیمت: {fmt_price(latest['close'])} ریال\n"
-        f"ADX: {latest['adx']:.1f}\n"
-        f"سقف دونچیان: {fmt_price(latest['donchian_high'])}\n"
-        f"وضعیت: {'در معامله' if state['in_position'] else 'خارج از معامله'}"
-    )
 
     # ===== بررسی سیگنال ورود =====
     if not state["in_position"] and check_entry(latest):
@@ -326,9 +383,10 @@ def run_once():
     state["last_candle_time"] = candle_key
     save_state(state)
 
-    # ===== هر ساعت لاگ بفرست =====
-    send_telegram(log_msg + "\n\n⏳ سیگنالی نیست")
-    print("No signal")
+    # ===== پیام وضعیت با درصد نزدیکی =====
+    status_msg = build_status_message(latest, now_str, state)
+    send_telegram(status_msg)
+    print("No signal — status sent")
 
 
 # ==================================================
