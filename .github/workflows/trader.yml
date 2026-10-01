@@ -30,16 +30,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python paper_trader.py once
       
-      - name: Debug Updates
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python debug_updates.py
-      
       - name: Commit state files
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add paper_state.json paper_trades.csv || true
           git diff --quiet && git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          git pull --rebase origin main
           git push || true
