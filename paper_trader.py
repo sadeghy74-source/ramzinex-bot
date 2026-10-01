@@ -14,24 +14,45 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==================================================
-# تنظیمات
+# ارزهای تحت پوشش (پارامتر بهینه هر کد)
 # ==================================================
-COIN         = "DOGE"
-SYMBOL       = "DOGEIRT"
-DONCHIAN_IN  = 30
-DONCHIAN_OUT = 15
-TRAILING_ATR = 4.0
-ADX_MIN      = 35
-VOL_MULT     = 1.5
+COINS = {
+    "DOGE": {
+        "symbol":       "DOGEIRT",
+        "donchian_in":  30,
+        "donchian_out": 15,
+        "trailing_atr": 4.0,
+        "adx_min":      35,
+        "vol_mult":     1.5,
+    },
+    "ADA": {
+        "symbol":       "ADAIRT",
+        "donchian_in":  20,
+        "donchian_out": 10,
+        "trailing_atr": 3.0,
+        "adx_min":      35,
+        "vol_mult":     1.5,
+    },
+    "XRP": {
+        "symbol":       "XRPIRT",
+        "donchian_in":  30,
+        "donchian_out": 15,
+        "trailing_atr": 4.0,
+        "adx_min":      30,
+        "vol_mult":     1.0,
+    },
+}
 
+# ==================================================
+# تنظیمات عمومی
+# ==================================================
 FEE             = 0.005
 SLIPPAGE        = 0.001
 INITIAL_CAPITAL = 20_000_000
 POSITION_PCT    = 1.0
 
-REAL_TRADING_ENABLED = True
-MAX_ORDER_RLS        = 100_000
-PENDING_TIMEOUT_MIN  = 30
+MAX_ORDER_RLS       = 100_000
+PENDING_TIMEOUT_MIN = 30
 
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
@@ -41,7 +62,6 @@ TRADES_FILE = "paper_trades.csv"
 # زمان ایران
 # ==================================================
 def now_iran():
-    """زمان فعلی به وقت ایران"""
     iran_tz = timezone(timedelta(hours=3, minutes=30))
     return datetime.now(iran_tz)
 
@@ -131,25 +151,25 @@ def get_wallets():
     return {}
 
 
-def place_market_buy(amount_rls):
+def place_market_buy(symbol, base_currency, amount_rls):
     body = {
         "type": "buy",
         "execution": "market",
         "srcCurrency": "rls",
-        "dstCurrency": "doge",
+        "dstCurrency": base_currency.lower(),
         "amount": str(int(amount_rls)),
         "price": "0",
     }
     return _sign_and_send("POST", "/market/orders/add", body)
 
 
-def place_market_sell(amount_doge):
+def place_market_sell(symbol, base_currency, amount_base):
     body = {
         "type": "sell",
         "execution": "market",
-        "srcCurrency": "doge",
+        "srcCurrency": base_currency.lower(),
         "dstCurrency": "rls",
-        "amount": str(float(amount_doge)),
+        "amount": str(float(amount_base)),
         "price": "0",
     }
     return _sign_and_send("POST", "/market/orders/add", body)
@@ -186,20 +206,23 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {
-        "in_position": False, "entry_price": 0, "entry_time": None,
-        "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
-        "capital": INITIAL_CAPITAL, "initial_capital": INITIAL_CAPITAL,
-        "position_pct": POSITION_PCT, "position_size": 0,
-        "last_candle_time": None,
-        "last_update_id": 0,
-        "pending": None,
-    }
+    # ساخت state برای هر ارز
+    state = {"last_update_id": 0, "coins": {}}
+    for coin in COINS:
+        state["coins"][coin] = {
+            "in_position": False, "entry_price": 0, "entry_time": None,
+            "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
+            "capital": INITIAL_CAPITAL, "initial_capital": INITIAL_CAPITAL,
+            "position_size": 0,
+            "last_candle_time": None,
+            "pending": None,
+        }
+    return state
 
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+        json.dump(state, f, indent=2, default=str)
 
 
 def log_trade(trade):
@@ -213,13 +236,14 @@ def log_trade(trade):
 # ==================================================
 # داده
 # ==================================================
-_cache = {"time": 0, "df": None}
+_cache = {}
 
 
 def fetch_candles(symbol, limit=500, cache_seconds=60):
     now_ts = time.time()
-    if _cache["df"] is not None and (now_ts - _cache["time"]) < cache_seconds:
-        return _cache["df"]
+    if symbol in _cache:
+        if (now_ts - _cache[symbol]["time"]) < cache_seconds:
+            return _cache[symbol]["df"]
 
     url = "https://apiv2.nobitex.ir/market/udf/history"
     now = int(time.time())
@@ -236,12 +260,11 @@ def fetch_candles(symbol, limit=500, cache_seconds=60):
                     "low":    data["l"], "close": data["c"],
                     "volume": data["v"],
                 })
-                _cache["time"] = now_ts
-                _cache["df"]   = df
+                _cache[symbol] = {"time": now_ts, "df": df}
                 return df
         except Exception:
             time.sleep(1)
-    return _cache["df"]
+    return _cache.get(symbol, {}).get("df")
 
 
 def drop_unclosed_candle(df):
@@ -254,7 +277,7 @@ def drop_unclosed_candle(df):
     return df
 
 
-def calculate_indicators(df):
+def calculate_indicators(df, donchian_in, donchian_out):
     df = df.copy()
     hl = df["high"] - df["low"]
     hc = (df["high"] - df["close"].shift()).abs()
@@ -273,8 +296,8 @@ def calculate_indicators(df):
     df["adx"] = dx.ewm(span=14, adjust=False).mean()
 
     df["vol_avg"]       = df["volume"].rolling(20).mean()
-    df["donchian_high"] = df["high"].rolling(DONCHIAN_IN).max().shift(1)
-    df["donchian_low"]  = df["low"].rolling(DONCHIAN_OUT).min().shift(1)
+    df["donchian_high"] = df["high"].rolling(donchian_in).max().shift(1)
+    df["donchian_low"]  = df["low"].rolling(donchian_out).min().shift(1)
 
     return df.dropna().reset_index(drop=True)
 
@@ -282,29 +305,29 @@ def calculate_indicators(df):
 # ==================================================
 # منطق
 # ==================================================
-def update_trailing_stop(state, latest):
-    if not state["in_position"]:
-        return state
-    if latest["high"] > state["highest_price"]:
-        state["highest_price"] = latest["high"]
-    new_sl = state["highest_price"] - (TRAILING_ATR * state["entry_atr"])
-    if new_sl > state["stop_loss"]:
-        state["stop_loss"] = new_sl
-    return state
+def update_trailing_stop(state_coin, latest, trailing_atr):
+    if not state_coin["in_position"]:
+        return state_coin
+    if latest["high"] > state_coin["highest_price"]:
+        state_coin["highest_price"] = latest["high"]
+    new_sl = state_coin["highest_price"] - (trailing_atr * state_coin["entry_atr"])
+    if new_sl > state_coin["stop_loss"]:
+        state_coin["stop_loss"] = new_sl
+    return state_coin
 
 
-def check_entry(latest):
+def check_entry(latest, adx_min, vol_mult):
     return (
         latest["close"] > latest["donchian_high"] and
-        latest["adx"] > ADX_MIN and
-        latest["volume"] > (VOL_MULT * latest["vol_avg"])
+        latest["adx"] > adx_min and
+        latest["volume"] > (vol_mult * latest["vol_avg"])
     )
 
 
-def check_exit(state, latest):
-    if not state["in_position"]:
+def check_exit(state_coin, latest):
+    if not state_coin["in_position"]:
         return None
-    if latest["low"] <= state["stop_loss"]:
+    if latest["low"] <= state_coin["stop_loss"]:
         return "STOP_LOSS"
     if latest["close"] < latest["donchian_low"]:
         return "BREAKDOWN"
@@ -312,7 +335,7 @@ def check_exit(state, latest):
 
 
 # ==================================================
-# پردازش دستورات
+# پردازش دستورات (چند ارزی)
 # ==================================================
 def process_commands(state):
     offset = state.get("last_update_id", 0) + 1
@@ -333,28 +356,45 @@ def process_commands(state):
             continue
 
         print(f"Received command: {text}")
+        parts = text.split()
 
-        # ===== /buy =====
-        if text == "/buy":
-            pending = state.get("pending")
+        # ==================================================
+        # /buy SYMBOL — تأیید خرید برای ارز مشخص
+        # ==================================================
+        if parts[0] == "/buy":
+            if len(parts) < 2:
+                send_telegram(
+                    "❓ <b>ارز رو مشخص کن</b>\n\n"
+                    "مثال: <code>/buy DOGE</code>\n"
+                    "ارزهای موجود: " + ", ".join(COINS.keys())
+                )
+                continue
+
+            coin = parts[1].upper()
+            if coin not in COINS:
+                send_telegram(f"❌ ارز <code>{coin}</code> پشتیبانی نمی‌شه")
+                continue
+
+            state_coin = state["coins"][coin]
+            pending = state_coin.get("pending")
 
             if not pending or pending.get("action") != "BUY":
-                send_telegram("❌ <b>سیگنال فعالی برای خرید نیست</b>")
+                send_telegram(f"❌ <b>سیگنال خرید فعالی برای {coin} نیست</b>")
                 continue
 
             pending_time = datetime.fromisoformat(pending["time"])
             age_min = (now_iran() - pending_time).total_seconds() / 60
             if age_min > PENDING_TIMEOUT_MIN:
-                send_telegram("❌ <b>سیگنال منقضی شده</b>")
-                state["pending"] = None
+                send_telegram(f"❌ <b>سیگنال {coin} منقضی شده</b>")
+                state_coin["pending"] = None
                 continue
 
             amount_rls = pending["amount_rls"]
-            send_telegram(f"⏳ در حال ارسال سفارش {amount_rls:,} ریال...")
-            print(f"Sending BUY: {amount_rls} RLS")
+            send_telegram(f"⏳ در حال ارسال سفارش خرید {coin} — {amount_rls:,} ریال...")
+            print(f"Sending BUY {coin}: {amount_rls} RLS")
 
             try:
-                code, res = place_market_buy(amount_rls)
+                code, res = place_market_buy(COINS[coin]["symbol"], coin, amount_rls)
             except Exception as e:
                 code, res = 0, {"error": str(e)}
 
@@ -365,23 +405,23 @@ def process_commands(state):
                 order_id = order.get("id", "?")
                 filled_price = order.get("price", pending["price"])
 
-                state["in_position"]   = True
-                state["entry_price"]   = float(filled_price) if filled_price else pending["price"]
-                state["entry_time"]    = str(pending["time"])
-                state["entry_atr"]     = pending["atr"]
-                state["highest_price"] = pending["price"]
-                state["stop_loss"]     = pending["price"] - (TRAILING_ATR * pending["atr"])
-                state["position_size"] = pending["size"]
-                state["pending"]       = None
+                state_coin["in_position"]   = True
+                state_coin["entry_price"]   = float(filled_price) if filled_price else pending["price"]
+                state_coin["entry_time"]    = str(pending["time"])
+                state_coin["entry_atr"]     = pending["atr"]
+                state_coin["highest_price"] = pending["price"]
+                state_coin["stop_loss"]     = pending["price"] - (COINS[coin]["trailing_atr"] * pending["atr"])
+                state_coin["position_size"] = pending["size"]
+                state_coin["pending"]       = None
                 save_state(state)
 
                 send_telegram(
-                    f"✅ <b>خرید انجام شد</b>\n"
+                    f"✅ <b>خرید {coin} انجام شد</b>\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"🆔 {order_id}\n"
                     f"💰 {fmt_price(filled_price)}\n"
-                    f"📦 {pending['size']:.4f} {COIN}\n"
-                    f"🛡️ SL: {fmt_price(state['stop_loss'])}"
+                    f"📦 {pending['size']:.4f} {coin}\n"
+                    f"🛡️ SL: {fmt_price(state_coin['stop_loss'])}"
                 )
             else:
                 try:
@@ -390,32 +430,45 @@ def process_commands(state):
                     err_json = str(res)
 
                 send_telegram(
-                    f"❌ <b>سفارش رد شد</b>\n"
+                    f"❌ <b>سفارش {coin} رد شد</b>\n"
                     f"Status: <code>{code}</code>\n"
                     f"<code>{err_json[:900]}</code>"
                 )
-                state["pending"] = None
+                state_coin["pending"] = None
                 save_state(state)
 
-        # ===== /sell =====
-        elif text == "/sell":
-            pending = state.get("pending")
-
-            if not pending or pending.get("action") != "SELL":
-                send_telegram("❌ <b>سیگنال فعالی برای فروش نیست</b>")
+        # ==================================================
+        # /sell SYMBOL
+        # ==================================================
+        elif parts[0] == "/sell":
+            if len(parts) < 2:
+                send_telegram(
+                    "❓ <b>ارز رو مشخص کن</b>\n\n"
+                    "مثال: <code>/sell DOGE</code>"
+                )
                 continue
 
-            send_telegram("⏳ در حال فروش...")
+            coin = parts[1].upper()
+            if coin not in COINS:
+                send_telegram(f"❌ ارز <code>{coin}</code> پشتیبانی نمی‌شه")
+                continue
+
+            state_coin = state["coins"][coin]
+
+            if not state_coin["in_position"]:
+                send_telegram(f"❌ <b>در {coin} معامله‌ای نداری</b>")
+                continue
+
+            send_telegram(f"⏳ در حال فروش {coin}...")
 
             wallets = get_wallets()
-            doge_balance = wallets.get("doge", 0)
-            if doge_balance <= 0:
-                send_telegram("❌ <b>موجودی DOGE صفره</b>")
-                state["pending"] = None
+            balance = wallets.get(coin.lower(), 0)
+            if balance <= 0:
+                send_telegram(f"❌ <b>موجودی {coin} صفره</b>")
                 continue
 
             try:
-                code, res = place_market_sell(doge_balance)
+                code, res = place_market_sell(COINS[coin]["symbol"], coin, balance)
             except Exception as e:
                 code, res = 0, {"error": str(e)}
 
@@ -424,27 +477,28 @@ def process_commands(state):
                 order_id = order.get("id", "?")
                 filled_price = float(order.get("price", 0))
 
-                entry_value = state["entry_price"] * state["position_size"]
-                exit_value  = filled_price * doge_balance
+                entry_value = state_coin["entry_price"] * state_coin["position_size"]
+                exit_value  = filled_price * balance
                 gross_pnl   = exit_value - entry_value
                 fee_amount  = (entry_value + exit_value) * (FEE / 2)
                 net_pnl     = gross_pnl - fee_amount
                 profit_pct  = (net_pnl / entry_value * 100) if entry_value > 0 else 0
 
-                state["capital"] = state.get("capital", INITIAL_CAPITAL) + net_pnl
+                state_coin["capital"] = state_coin.get("capital", INITIAL_CAPITAL) + net_pnl
                 log_trade({
-                    "entry_time":  state.get("entry_time"),
+                    "coin":        coin,
+                    "entry_time":  state_coin.get("entry_time"),
                     "exit_time":   str(now_iran()),
-                    "entry":       round(state["entry_price"], 6),
+                    "entry":       round(state_coin["entry_price"], 6),
                     "exit":        round(filled_price, 6),
-                    "size":        round(doge_balance, 6),
+                    "size":        round(balance, 6),
                     "profit_rial": round(net_pnl, 2),
                     "profit_%":    round(profit_pct, 3),
-                    "capital":     round(state["capital"], 2),
+                    "capital":     round(state_coin["capital"], 2),
                     "reason":      "MANUAL_SELL",
                 })
 
-                state.update({
+                state_coin.update({
                     "in_position": False, "entry_price": 0, "entry_time": None,
                     "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
                     "position_size": 0, "pending": None,
@@ -453,7 +507,7 @@ def process_commands(state):
 
                 color = "🟢" if net_pnl > 0 else "🔴"
                 send_telegram(
-                    f"{color} <b>فروش انجام شد</b>\n"
+                    f"{color} <b>فروش {coin} انجام شد</b>\n"
                     f"💰 {fmt_price(filled_price)}\n"
                     f"📊 {net_pnl:+,.0f} ({profit_pct:+.2f}%)"
                 )
@@ -464,47 +518,68 @@ def process_commands(state):
                     err_json = str(res)
 
                 send_telegram(
-                    f"❌ <b>سفارش فروش رد شد</b>\n"
+                    f"❌ <b>سفارش فروش {coin} رد شد</b>\n"
                     f"Status: <code>{code}</code>\n"
                     f"<code>{err_json[:900]}</code>"
                 )
-                state["pending"] = None
+                state_coin["pending"] = None
                 save_state(state)
 
-        # ===== /cancel =====
-        elif text == "/cancel":
-            state["pending"] = None
-            save_state(state)
-            send_telegram("❌ <b>لغو شد</b>")
+        # ==================================================
+        # /cancel SYMBOL
+        # ==================================================
+        elif parts[0] == "/cancel":
+            if len(parts) >= 2:
+                coin = parts[1].upper()
+                if coin in COINS:
+                    state["coins"][coin]["pending"] = None
+                    save_state(state)
+                    send_telegram(f"❌ <b>لغو {coin} انجام شد</b>")
+                else:
+                    send_telegram(f"❌ ارز <code>{coin}</code> پشتیبانی نمی‌شه")
+            else:
+                for coin in COINS:
+                    state["coins"][coin]["pending"] = None
+                save_state(state)
+                send_telegram("❌ <b>همه لغو شدند</b>")
 
-        # ===== /status =====
+        # ==================================================
+        # /status
+        # ==================================================
         elif text == "/status":
             wallets = get_wallets()
             rls = wallets.get("rls", 0)
-            doge = wallets.get("doge", 0)
-            if state["in_position"]:
-                send_telegram(
-                    f"🟢 در معامله\n"
-                    f"💰 {fmt_price(state['entry_price'])}\n"
-                    f"📦 {state['position_size']:.4f}\n"
-                    f"🛡️ {fmt_price(state['stop_loss'])}\n"
-                    f"💼 RLS: {rls:,.0f}\n🪙 DOGE: {doge:.4f}"
-                )
-            else:
-                send_telegram(
-                    f"⚪ خارج از معامله\n"
-                    f"💼 RLS: {rls:,.0f}\n🪙 DOGE: {doge:.4f}"
-                )
 
-        # ===== /start /help =====
+            msg = f"📊 <b>وضعیت</b>\n"
+            msg += f"━━━━━━━━━━━━━━━\n"
+            msg += f"💼 RLS: {rls:,.0f}\n\n"
+
+            for coin in COINS:
+                sc = state["coins"][coin]
+                balance = wallets.get(coin.lower(), 0)
+                if sc["in_position"]:
+                    msg += f"🟢 <b>{coin}</b>: در معامله\n"
+                    msg += f"   💰 {fmt_price(sc['entry_price'])} | 📦 {sc['position_size']:.4f}\n"
+                    msg += f"   🛡️ SL: {fmt_price(sc['stop_loss'])}\n"
+                else:
+                    msg += f"⚪ <b>{coin}</b>: خارج (موجودی: {balance:.4f})\n"
+
+            send_telegram(msg)
+
+        # ==================================================
+        # /help
+        # ==================================================
         elif text in ("/start", "/help"):
+            coins_list = ", ".join(COINS.keys())
             send_telegram(
                 f"🤖 <b>دستورات</b>\n"
-                f"/buy — خرید\n"
-                f"/sell — فروش\n"
-                f"/cancel — لغو\n"
-                f"/status — وضعیت\n"
-                f"/help — راهنما"
+                f"━━━━━━━━━━━━━━━\n"
+                f"<b>ارزهای موجود:</b> {coins_list}\n\n"
+                f"<code>/buy DOGE</code> — خرید DOGE\n"
+                f"<code>/sell ADA</code> — فروش ADA\n"
+                f"<code>/cancel XRP</code> — لغو XRP\n"
+                f"<code>/status</code> — وضعیت همه\n"
+                f"<code>/help</code> — راهنما"
             )
 
         else:
@@ -517,7 +592,8 @@ def process_commands(state):
 # ==================================================
 # پیام وضعیت
 # ==================================================
-def build_status_message(latest, now_str, state):
+def build_status_message(coin, latest, now_str, state_coin):
+    params = COINS[coin]
     price     = latest["close"]
     donchian  = latest["donchian_high"]
     adx       = latest["adx"]
@@ -526,14 +602,14 @@ def build_status_message(latest, now_str, state):
     vol_ratio = volume / vol_avg if vol_avg > 0 else 0
 
     price_pct = min(100, (price / donchian * 100)) if donchian > 0 else 0
-    adx_pct   = min(100, (adx / ADX_MIN * 100))
-    vol_pct   = min(100, (vol_ratio / VOL_MULT * 100))
+    adx_pct   = min(100, (adx / params["adx_min"] * 100))
+    vol_pct   = min(100, (vol_ratio / params["vol_mult"] * 100))
     total_pct = (price_pct + adx_pct + vol_pct) / 3
 
-    buy_ok = check_entry(latest) and not state["in_position"]
+    buy_ok = check_entry(latest, params["adx_min"], params["vol_mult"]) and not state_coin["in_position"]
 
     msg = (
-        f"📊 <b>بررسی {COIN}</b>\n"
+        f"📊 <b>بررسی {coin}</b>\n"
         f"🕐 {now_str}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"💰 قیمت: <b>{fmt_price(price)}</b> ریال\n\n"
@@ -541,24 +617,24 @@ def build_status_message(latest, now_str, state):
         f"{status_emoji(price_pct)} قیمت vs سقف: <b>{price_pct:.1f}%</b>\n"
         f"   <code>{progress_bar(price_pct)}</code>\n"
         f"   هدف: {fmt_price(donchian)}\n\n"
-        f"{status_emoji(adx_pct)} ADX: <b>{adx:.1f}</b> / {ADX_MIN} (<b>{adx_pct:.1f}%</b>)\n"
+        f"{status_emoji(adx_pct)} ADX: <b>{adx:.1f}</b> / {params['adx_min']} (<b>{adx_pct:.1f}%</b>)\n"
         f"   <code>{progress_bar(adx_pct)}</code>\n\n"
-        f"{status_emoji(vol_pct)} حجم: <b>{vol_ratio:.2f}x</b> / {VOL_MULT}x (<b>{vol_pct:.1f}%</b>)\n"
+        f"{status_emoji(vol_pct)} حجم: <b>{vol_ratio:.2f}x</b> / {params['vol_mult']}x (<b>{vol_pct:.1f}%</b>)\n"
         f"   <code>{progress_bar(vol_pct)}</code>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🎯 <b>آمادگی: {total_pct:.1f}%</b>\n"
     )
 
-    if state["in_position"]:
+    if state_coin["in_position"]:
         msg += (
             f"\n🟢 <b>در معامله</b>\n"
-            f"💰 {fmt_price(state['entry_price'])}\n"
-            f"🛡️ SL: {fmt_price(state['stop_loss'])}\n"
-            f"\n🔴 برای فروش: /sell"
+            f"💰 {fmt_price(state_coin['entry_price'])}\n"
+            f"🛡️ SL: {fmt_price(state_coin['stop_loss'])}\n"
+            f"\n🔴 برای فروش: <code>/sell {coin}</code>"
         )
     elif buy_ok:
         msg += "\n\n🟢 <b>سیگنال خرید آماده!</b>"
-        msg += "\n📩 بفرست: <code>/buy</code>"
+        msg += f"\n📩 بفرست: <code>/buy {coin}</code>"
     elif total_pct >= 90:
         msg += "\n⚡ <b>نزدیک سیگنال!</b>"
     elif total_pct >= 70:
@@ -576,64 +652,72 @@ def build_status_message(latest, now_str, state):
 # ==================================================
 def run_once():
     now_str = now_iran().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{now_str}] Checking {COIN}...")
+    print(f"\n[{now_str}] Checking all coins...")
 
     state = load_state()
 
-    # ===== ۱. داده =====
-    df_raw = fetch_candles(SYMBOL, limit=500)
-    if df_raw is None or len(df_raw) < 100:
-        print("No data")
-        return
+    # ===== ۱. پردازش هر ارز =====
+    for coin in COINS:
+        params = COINS[coin]
+        state_coin = state["coins"][coin]
 
-    df = calculate_indicators(drop_unclosed_candle(df_raw))
-    latest = df.iloc[-1]
+        print(f"\n  [{coin}]")
+        df_raw = fetch_candles(params["symbol"], limit=500)
+        if df_raw is None or len(df_raw) < 100:
+            print(f"    No data")
+            continue
 
-    # ===== ۲. Trailing =====
-    update_trailing_stop(state, latest)
-    save_state(state)
+        df = calculate_indicators(drop_unclosed_candle(df_raw),
+                                  params["donchian_in"], params["donchian_out"])
+        if len(df) == 0:
+            continue
+        latest = df.iloc[-1]
 
-    # ===== ۳. پیام + pending =====
-    msg, buy_ok = build_status_message(latest, now_str, state)
-
-    # ===== ۳a. pending خرید =====
-    if buy_ok and not state["in_position"]:
-        entry_price = latest["close"] * (1 + SLIPPAGE)
-        trade_value = state["capital"] * POSITION_PCT
-        position_size = (trade_value * (1 - FEE / 2)) / entry_price
-        amount_rls = min(trade_value, MAX_ORDER_RLS)
-
-        state["pending"] = {
-            "action":      "BUY",
-            "price":       entry_price,
-            "size":        position_size,
-            "amount_rls":  amount_rls,
-            "atr":         latest["atr"],
-            "time":        now_iran().isoformat(),
-        }
+        # Trailing
+        update_trailing_stop(state_coin, latest, params["trailing_atr"])
         save_state(state)
-        print(f">>> BUY PENDING @ {fmt_price(entry_price)}")
 
-    # ===== ۳b. pending فروش =====
-    elif state["in_position"]:
-        exit_price = latest["close"] * (1 - SLIPPAGE)
-        state["pending"] = {
-            "action":      "SELL",
-            "price":       exit_price,
-            "time":        now_iran().isoformat(),
-        }
-        save_state(state)
-        print(f"<<< SELL PENDING @ {fmt_price(exit_price)}")
+        # پیام
+        msg, buy_ok = build_status_message(coin, latest, now_str, state_coin)
 
-    # ===== ۴. پردازش دستورات =====
+        # pending خرید
+        if buy_ok and not state_coin["in_position"]:
+            entry_price = latest["close"] * (1 + SLIPPAGE)
+            trade_value = state_coin["capital"] * POSITION_PCT
+            position_size = (trade_value * (1 - FEE / 2)) / entry_price
+            amount_rls = min(trade_value, MAX_ORDER_RLS)
+
+            state_coin["pending"] = {
+                "action":      "BUY",
+                "price":       entry_price,
+                "size":        position_size,
+                "amount_rls":  amount_rls,
+                "atr":         latest["atr"],
+                "time":        now_iran().isoformat(),
+            }
+            save_state(state)
+            print(f"    >>> BUY PENDING @ {fmt_price(entry_price)}")
+
+        # pending فروش
+        elif state_coin["in_position"]:
+            exit_price = latest["close"] * (1 - SLIPPAGE)
+            state_coin["pending"] = {
+                "action":      "SELL",
+                "price":       exit_price,
+                "time":        now_iran().isoformat(),
+            }
+            save_state(state)
+            print(f"    <<< SELL PENDING @ {fmt_price(exit_price)}")
+
+        # ارسال پیام
+        send_telegram(msg)
+        print(f"    Status sent")
+
+    # ===== ۲. پردازش دستورات =====
     try:
         state = process_commands(state)
     except Exception as e:
         print(f"Command error: {e}")
-
-    # ===== ۵. ارسال پیام =====
-    send_telegram(msg)
-    print("Status sent")
 
 
 # ==================================================
