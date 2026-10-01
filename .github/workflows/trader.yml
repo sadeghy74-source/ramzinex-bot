@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ramzinex-trader
+  cancel-in-progress: false
+
 jobs:
   run-trader:
     runs-on: ubuntu-latest
