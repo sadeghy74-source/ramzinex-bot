@@ -2,7 +2,7 @@ name: Ramzinex Paper Trader
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,6 @@ permissions:
 jobs:
   run-trader:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,8 +23,7 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: |
-          pip install requests pandas numpy python-dotenv pynacl
+        run: pip install requests pandas numpy python-dotenv pynacl
       
       - name: Run Paper Trader
         env:
@@ -35,11 +33,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python paper_trader.py once
       
-      - name: Commit state files
+      - name: Commit state
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update state [skip ci]"
           file_pattern: "paper_state.json paper_trades.csv"
           commit_user_name: "GitHub Action"
           commit_user_email: "action@github.com"
-          skip_dirty_check: false
