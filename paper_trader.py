@@ -5,7 +5,7 @@ import time
 import base64
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # ===== خواندن کلیدها =====
 PUBLIC_KEY  = os.getenv("NOBITEX_PUBLIC_KEY")
@@ -35,6 +35,15 @@ PENDING_TIMEOUT_MIN  = 30
 
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
+
+
+# ==================================================
+# زمان ایران
+# ==================================================
+def now_iran():
+    """زمان فعلی به وقت ایران"""
+    iran_tz = timezone(timedelta(hours=3, minutes=30))
+    return datetime.now(iran_tz)
 
 
 # ==================================================
@@ -334,7 +343,7 @@ def process_commands(state):
                 continue
 
             pending_time = datetime.fromisoformat(pending["time"])
-            age_min = (datetime.now() - pending_time).total_seconds() / 60
+            age_min = (now_iran() - pending_time).total_seconds() / 60
             if age_min > PENDING_TIMEOUT_MIN:
                 send_telegram("❌ <b>سیگنال منقضی شده</b>")
                 state["pending"] = None
@@ -425,7 +434,7 @@ def process_commands(state):
                 state["capital"] = state.get("capital", INITIAL_CAPITAL) + net_pnl
                 log_trade({
                     "entry_time":  state.get("entry_time"),
-                    "exit_time":   str(datetime.now()),
+                    "exit_time":   str(now_iran()),
                     "entry":       round(state["entry_price"], 6),
                     "exit":        round(filled_price, 6),
                     "size":        round(doge_balance, 6),
@@ -566,7 +575,7 @@ def build_status_message(latest, now_str, state):
 # اجرا
 # ==================================================
 def run_once():
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now_iran().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{now_str}] Checking {COIN}...")
 
     state = load_state()
@@ -600,7 +609,7 @@ def run_once():
             "size":        position_size,
             "amount_rls":  amount_rls,
             "atr":         latest["atr"],
-            "time":        datetime.now().isoformat(),
+            "time":        now_iran().isoformat(),
         }
         save_state(state)
         print(f">>> BUY PENDING @ {fmt_price(entry_price)}")
@@ -611,7 +620,7 @@ def run_once():
         state["pending"] = {
             "action":      "SELL",
             "price":       exit_price,
-            "time":        datetime.now().isoformat(),
+            "time":        now_iran().isoformat(),
         }
         save_state(state)
         print(f"<<< SELL PENDING @ {fmt_price(exit_price)}")
