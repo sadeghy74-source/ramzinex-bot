@@ -14,7 +14,7 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==================================================
-# ارزهای تحت پوشش (پارامتر بهینه هر کد)
+# ارزهای تحت پوشش
 # ==================================================
 COINS = {
     "DOGE": {
@@ -53,6 +53,7 @@ POSITION_PCT    = 1.0
 
 MAX_ORDER_RLS       = 100_000
 PENDING_TIMEOUT_MIN = 30
+MESSAGE_MAX_AGE_SEC = 900   # فقط پیام‌های ۱۵ دقیقه اخیر پردازش بشن
 
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
@@ -204,20 +205,36 @@ def status_emoji(pct):
 # ==================================================
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    # ساخت state برای هر ارز
+        try:
+            with open(STATE_FILE, "r") as f:
+                state = json.load(f)
+            # ===== اطمینان از وجود ساختار coins =====
+            if "coins" not in state:
+                raise ValueError("Old state format")
+            # ===== اطمینان از وجود همه ارزها =====
+            for coin in COINS:
+                if coin not in state["coins"]:
+                    state["coins"][coin] = _new_coin_state()
+            return state
+        except Exception:
+            pass
+
+    # ===== ساخت state جدید =====
     state = {"last_update_id": 0, "coins": {}}
     for coin in COINS:
-        state["coins"][coin] = {
-            "in_position": False, "entry_price": 0, "entry_time": None,
-            "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
-            "capital": INITIAL_CAPITAL, "initial_capital": INITIAL_CAPITAL,
-            "position_size": 0,
-            "last_candle_time": None,
-            "pending": None,
-        }
+        state["coins"][coin] = _new_coin_state()
     return state
+
+
+def _new_coin_state():
+    return {
+        "in_position": False, "entry_price": 0, "entry_time": None,
+        "stop_loss": 0, "highest_price": 0, "entry_atr": 0,
+        "capital": INITIAL_CAPITAL, "initial_capital": INITIAL_CAPITAL,
+        "position_size": 0,
+        "last_candle_time": None,
+        "pending": None,
+    }
 
 
 def save_state(state):
@@ -335,7 +352,7 @@ def check_exit(state_coin, latest):
 
 
 # ==================================================
-# پردازش دستورات (چند ارزی)
+# پردازش دستورات
 # ==================================================
 def process_commands(state):
     offset = state.get("last_update_id", 0) + 1
@@ -355,11 +372,18 @@ def process_commands(state):
         if not text:
             continue
 
+        # ===== فیلتر پیام‌های قدیمی =====
+        msg_date = msg.get("date", 0)
+        age_sec = time.time() - msg_date
+        if age_sec > MESSAGE_MAX_AGE_SEC:
+            print(f"Skipping old message: {text} (age: {int(age_sec/60)} min)")
+            continue
+
         print(f"Received command: {text}")
         parts = text.split()
 
         # ==================================================
-        # /buy SYMBOL — تأیید خرید برای ارز مشخص
+        # /buy SYMBOL
         # ==================================================
         if parts[0] == "/buy":
             if len(parts) < 2:
@@ -383,7 +407,7 @@ def process_commands(state):
                 continue
 
             pending_time = datetime.fromisoformat(pending["time"])
-            age_min = (now_iran() - pending_time).total_seconds() / 60
+            age_min = (now_iran().replace(tzinfo=None) - pending_time.replace(tzinfo=None)).total_seconds() / 60
             if age_min > PENDING_TIMEOUT_MIN:
                 send_telegram(f"❌ <b>سیگنال {coin} منقضی شده</b>")
                 state_coin["pending"] = None
@@ -526,7 +550,7 @@ def process_commands(state):
                 save_state(state)
 
         # ==================================================
-        # /cancel SYMBOL
+        # /cancel
         # ==================================================
         elif parts[0] == "/cancel":
             if len(parts) >= 2:
