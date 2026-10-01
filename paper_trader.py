@@ -33,8 +33,6 @@ REAL_TRADING_ENABLED = True
 MAX_ORDER_RLS        = 100_000
 PENDING_TIMEOUT_MIN  = 30
 
-TEST_MODE_FORCE_BUY = True   # ← برای تست True، بعداً False کن
-
 STATE_FILE  = "paper_state.json"
 TRADES_FILE = "paper_trades.csv"
 
@@ -128,9 +126,10 @@ def place_market_buy(amount_rls):
     body = {
         "type": "buy",
         "execution": "market",
-        "market": SYMBOL,
-        "amount": int(amount_rls),
-        "price": 0,
+        "srcCurrency": "rls",
+        "dstCurrency": "doge",
+        "amount": str(int(amount_rls)),
+        "price": "0",
     }
     return _sign_and_send("POST", "/market/orders/add", body)
 
@@ -139,9 +138,10 @@ def place_market_sell(amount_doge):
     body = {
         "type": "sell",
         "execution": "market",
-        "market": SYMBOL,
-        "amount": float(amount_doge),
-        "price": 0,
+        "srcCurrency": "doge",
+        "dstCurrency": "rls",
+        "amount": str(float(amount_doge)),
+        "price": "0",
     }
     return _sign_and_send("POST", "/market/orders/add", body)
 
@@ -325,6 +325,7 @@ def process_commands(state):
 
         print(f"Received command: {text}")
 
+        # ===== /buy =====
         if text == "/buy":
             pending = state.get("pending")
 
@@ -387,6 +388,7 @@ def process_commands(state):
                 state["pending"] = None
                 save_state(state)
 
+        # ===== /sell =====
         elif text == "/sell":
             pending = state.get("pending")
 
@@ -460,11 +462,13 @@ def process_commands(state):
                 state["pending"] = None
                 save_state(state)
 
+        # ===== /cancel =====
         elif text == "/cancel":
             state["pending"] = None
             save_state(state)
             send_telegram("❌ <b>لغو شد</b>")
 
+        # ===== /status =====
         elif text == "/status":
             wallets = get_wallets()
             rls = wallets.get("rls", 0)
@@ -483,6 +487,7 @@ def process_commands(state):
                     f"💼 RLS: {rls:,.0f}\n🪙 DOGE: {doge:.4f}"
                 )
 
+        # ===== /start /help =====
         elif text in ("/start", "/help"):
             send_telegram(
                 f"🤖 <b>دستورات</b>\n"
@@ -516,12 +521,7 @@ def build_status_message(latest, now_str, state):
     vol_pct   = min(100, (vol_ratio / VOL_MULT * 100))
     total_pct = (price_pct + adx_pct + vol_pct) / 3
 
-    real_buy_ok = (
-        latest["close"] > latest["donchian_high"] and
-        latest["adx"] > ADX_MIN and
-        latest["volume"] > (VOL_MULT * latest["vol_avg"])
-    )
-    buy_ok = True if (TEST_MODE_FORCE_BUY and not state["in_position"]) else real_buy_ok
+    buy_ok = check_entry(latest) and not state["in_position"]
 
     msg = (
         f"📊 <b>بررسی {COIN}</b>\n"
@@ -531,18 +531,14 @@ def build_status_message(latest, now_str, state):
         f"<b>شرایط ورود:</b>\n"
         f"{status_emoji(price_pct)} قیمت vs سقف: <b>{price_pct:.1f}%</b>\n"
         f"   <code>{progress_bar(price_pct)}</code>\n"
-        f"\n"
+        f"   هدف: {fmt_price(donchian)}\n\n"
         f"{status_emoji(adx_pct)} ADX: <b>{adx:.1f}</b> / {ADX_MIN} (<b>{adx_pct:.1f}%</b>)\n"
-        f"   <code>{progress_bar(adx_pct)}</code>\n"
-        f"\n"
+        f"   <code>{progress_bar(adx_pct)}</code>\n\n"
         f"{status_emoji(vol_pct)} حجم: <b>{vol_ratio:.2f}x</b> / {VOL_MULT}x (<b>{vol_pct:.1f}%</b>)\n"
         f"   <code>{progress_bar(vol_pct)}</code>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🎯 <b>آمادگی: {total_pct:.1f}%</b>\n"
     )
-
-    if TEST_MODE_FORCE_BUY and not state["in_position"]:
-        msg += "\n🧪 <b>حالت تست فعال</b>"
 
     if state["in_position"]:
         msg += (
@@ -575,7 +571,7 @@ def run_once():
 
     state = load_state()
 
-    # ===== ۱. اول داده بگیر =====
+    # ===== ۱. داده =====
     df_raw = fetch_candles(SYMBOL, limit=500)
     if df_raw is None or len(df_raw) < 100:
         print("No data")
@@ -588,7 +584,7 @@ def run_once():
     update_trailing_stop(state, latest)
     save_state(state)
 
-    # ===== ۳. ساخت پیام و ثبت pending =====
+    # ===== ۳. پیام + pending =====
     msg, buy_ok = build_status_message(latest, now_str, state)
 
     # ===== ۳a. pending خرید =====
@@ -620,13 +616,13 @@ def run_once():
         save_state(state)
         print(f"<<< SELL PENDING @ {fmt_price(exit_price)}")
 
-    # ===== ۴. حالا دستورات /buy و /sell رو پردازش کن =====
+    # ===== ۴. پردازش دستورات =====
     try:
         state = process_commands(state)
     except Exception as e:
         print(f"Command error: {e}")
 
-    # ===== ۵. ارسال پیام وضعیت =====
+    # ===== ۵. ارسال پیام =====
     send_telegram(msg)
     print("Status sent")
 
