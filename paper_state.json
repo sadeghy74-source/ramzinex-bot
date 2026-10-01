@@ -1,0 +1,44 @@
+{
+  "last_update_id": 344906607,
+  "coins": {
+    "DOGE": {
+      "in_position": false,
+      "entry_price": 0,
+      "entry_time": null,
+      "stop_loss": 0,
+      "highest_price": 0,
+      "entry_atr": 0,
+      "capital": 20000000,
+      "initial_capital": 20000000,
+      "position_size": 0,
+      "last_candle_time": null,
+      "pending": null
+    },
+    "ADA": {
+      "in_position": false,
+      "entry_price": 0,
+      "entry_time": null,
+      "stop_loss": 0,
+      "highest_price": 0,
+      "entry_atr": 0,
+      "capital": 20000000,
+      "initial_capital": 20000000,
+      "position_size": 0,
+      "last_candle_time": null,
+      "pending": null
+    },
+    "XRP": {
+      "in_position": false,
+      "entry_price": 0,
+      "entry_time": null,
+      "stop_loss": 0,
+      "highest_price": 0,
+      "entry_atr": 0,
+      "capital": 20000000,
+      "initial_capital": 20000000,
+      "position_size": 0,
+      "last_candle_time": null,
+      "pending": null
+    }
+  }
+}
