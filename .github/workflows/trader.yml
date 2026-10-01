@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+          fetch-depth: 0
       
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,13 +37,10 @@ jobs:
         run: python paper_trader.py once
       
       - name: Commit state files
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Update state [skip ci]"
-          file_pattern: |
-            paper_state.json
-            paper_trades.csv
-            paper_*.json
-            paper_*.csv
-          commit_user_name: "GitHub Action"
-          commit_user_email: "action@github.com"
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git pull --rebase origin main || true
+          git add -A
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          git push || true
