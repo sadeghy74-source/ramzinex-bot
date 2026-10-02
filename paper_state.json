@@ -38,7 +38,14 @@
       "initial_capital": 20000000,
       "position_size": 0,
       "last_candle_time": null,
-      "pending": null
+      "pending": {
+        "action": "BUY",
+        "price": 393883.48999999993,
+        "size": 50.64949536219455,
+        "amount_rls": 100000,
+        "atr": 2904.214285714286,
+        "time": "2026-10-02T10:21:59.002597+03:30"
+      }
     }
   }
 }
